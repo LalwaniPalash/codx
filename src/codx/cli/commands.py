@@ -19,7 +19,7 @@ from ..core.models import Snippet
 from ..utils.variables import extract_variables, prompt_for_variables
 from ..utils.execution import execute_snippet, open_editor_for_content, get_file_extension
 import json
-from ..utils.search import fuzzy_search_snippets
+from ..utils.search import search_snippets
 from ..tui import SnippetFinderApp
 
 console = Console()
@@ -105,6 +105,8 @@ def init(
     db = Database(db_path)
     try:
         db.initialize_database()
+        # Populate FTS5 table if there are existing snippets
+        db.populate_fts_table()
         console.print("[green]✓ Database initialized successfully![/green]")
         console.print("[dim]You can now add snippets with 'codx add'[/dim]")
     except Exception as e:
@@ -416,22 +418,24 @@ def find(
     
     db = Database(get_db_path())
     try:
-        snippets = db.get_all_snippets()
-        
-        if not snippets:
-            console.print("[yellow]No snippets found. Add some with 'codx add'.[/yellow]")
-            raise typer.Exit(0)
-        
-        # Apply filters
-        if language:
-            snippets = [s for s in snippets if s.get('language', '').lower() == language.lower()]
-        
-        if tag:
-            snippets = [s for s in snippets if tag.lower() in [t.lower() for t in s.get('tags', [])]]
-        
-        if not snippets:
-            console.print("[yellow]No snippets match the specified filters.[/yellow]")
-            raise typer.Exit(0)
+        # For interactive mode without query, get all snippets
+        if interactive and not query:
+            snippets = db.get_all_snippets()
+            
+            if not snippets:
+                console.print("[yellow]No snippets found. Add some with 'codx add'.[/yellow]")
+                raise typer.Exit(0)
+            
+            # Apply filters for interactive mode
+            if language:
+                snippets = [s for s in snippets if s.get('language', '').lower() == language.lower()]
+            
+            if tag:
+                snippets = [s for s in snippets if tag.lower() in [t.lower() for t in s.get('tags', [])]]
+            
+            if not snippets:
+                console.print("[yellow]No snippets match the specified filters.[/yellow]")
+                raise typer.Exit(0)
         
         # Interactive TUI mode
         if interactive:
@@ -484,11 +488,29 @@ def find(
         if not interactive:
             # Perform search if query provided
             if query:
-                results = fuzzy_search_snippets(snippets, query)
+                results = search_snippets(db, query, language_filter=language, tag_filter=tag)
                 if not results:
                     console.print(f"[yellow]No snippets found matching '{query}'.[/yellow]")
                     raise typer.Exit(0)
                 snippets = results
+            else:
+                # No query provided - get all snippets and apply filters
+                snippets = db.get_all_snippets()
+                
+                if not snippets:
+                    console.print("[yellow]No snippets found. Add some with 'codx add'.[/yellow]")
+                    raise typer.Exit(0)
+                
+                # Apply filters when no query is provided
+                if language:
+                    snippets = [s for s in snippets if s.get('language', '').lower() == language.lower()]
+                
+                if tag:
+                    snippets = [s for s in snippets if tag.lower() in [t.lower() for t in s.get('tags', [])]]
+                
+                if not snippets:
+                    console.print("[yellow]No snippets match the specified filters.[/yellow]")
+                    raise typer.Exit(0)
             
             # Display results in table format
             table = Table(show_header=True, header_style="bold magenta")

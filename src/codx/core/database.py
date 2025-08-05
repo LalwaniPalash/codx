@@ -312,6 +312,180 @@ class Database:
             return False
         finally:
             cursor.close()
+    
+    def search_snippets_fts(self, query: str, limit: int = 50) -> list:
+        """Search snippets using FTS5 full-text search.
+        
+        Args:
+            query: Search query string
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of dictionaries containing snippet data with search rank
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            # Prepare the FTS5 query - escape special characters and add wildcards
+            fts_query = self._prepare_fts_query(query)
+            
+            # Search using FTS5 with ranking
+            cursor.execute("""
+                SELECT s.id, s.description, s.content, s.language, s.created_at, s.updated_at,
+                       GROUP_CONCAT(t.name, ', ') as tags,
+                       fts.rank
+                FROM snippets_fts fts
+                JOIN snippets s ON fts.content_id = s.id
+                LEFT JOIN snippet_tags st ON s.id = st.snippet_id
+                LEFT JOIN tags t ON st.tag_id = t.id
+                WHERE snippets_fts MATCH ?
+                GROUP BY s.id
+                ORDER BY fts.rank
+                LIMIT ?
+            """, (fts_query, limit))
+            
+            rows = cursor.fetchall()
+            snippets = []
+            
+            for row in rows:
+                snippet = {
+                    'id': row[0],
+                    'description': row[1] or '',
+                    'content': row[2],
+                    'language': row[3] or '',
+                    'created_at': row[4],
+                    'updated_at': row[5],
+                    'tags': row[6].split(', ') if row[6] else [],
+                    'rank': row[7] if len(row) > 7 else 0
+                }
+                snippets.append(snippet)
+            
+            return snippets
+            
+        except sqlite3.Error as e:
+            # Fallback to regular search if FTS5 fails
+            print(f"FTS5 search failed, falling back to regular search: {e}")
+            return self._fallback_search(query, limit)
+        finally:
+            cursor.close()
+    
+    def _prepare_fts_query(self, query: str) -> str:
+        """Prepare a query string for FTS5 search.
+        
+        Args:
+            query: Raw search query
+            
+        Returns:
+            FTS5-formatted query string
+        """
+        # Remove special FTS5 characters that could cause syntax errors
+        special_chars = ['"', "'", '(', ')', '*', ':', '^']
+        cleaned_query = query
+        for char in special_chars:
+            cleaned_query = cleaned_query.replace(char, ' ')
+        
+        # Split into words and add prefix matching
+        words = [word.strip() for word in cleaned_query.split() if word.strip()]
+        if not words:
+            return '""'  # Empty query
+        
+        # Create FTS5 query with prefix matching for each word
+        fts_terms = []
+        for word in words:
+            if len(word) >= 2:  # Only add prefix matching for words with 2+ chars
+                fts_terms.append(f'{word}*')
+            else:
+                fts_terms.append(word)
+        
+        return ' '.join(fts_terms)
+    
+    def _fallback_search(self, query: str, limit: int) -> list:
+        """Fallback search method when FTS5 is not available.
+        
+        Args:
+            query: Search query string
+            limit: Maximum number of results
+            
+        Returns:
+            List of snippets matching the query
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            # Simple LIKE-based search as fallback
+            search_pattern = f"%{query}%"
+            cursor.execute("""
+                SELECT s.id, s.description, s.content, s.language, s.created_at, s.updated_at,
+                       GROUP_CONCAT(t.name, ', ') as tags
+                FROM snippets s
+                LEFT JOIN snippet_tags st ON s.id = st.snippet_id
+                LEFT JOIN tags t ON st.tag_id = t.id
+                WHERE s.description LIKE ? OR s.content LIKE ? OR s.language LIKE ?
+                GROUP BY s.id
+                ORDER BY s.created_at DESC
+                LIMIT ?
+            """, (search_pattern, search_pattern, search_pattern, limit))
+            
+            rows = cursor.fetchall()
+            snippets = []
+            
+            for row in rows:
+                snippet = {
+                    'id': row[0],
+                    'description': row[1] or '',
+                    'content': row[2],
+                    'language': row[3] or '',
+                    'created_at': row[4],
+                    'updated_at': row[5],
+                    'tags': row[6].split(', ') if row[6] else [],
+                    'rank': 0  # No ranking for fallback search
+                }
+                snippets.append(snippet)
+            
+            return snippets
+            
+        except sqlite3.Error as e:
+            raise Exception(f"Fallback search failed: {e}")
+        finally:
+            cursor.close()
+    
+    def populate_fts_table(self):
+        """Populate the FTS5 table with existing snippet data.
+        
+        This method should be called after adding the FTS5 table to an existing database.
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            # Clear existing FTS data
+            cursor.execute("DELETE FROM snippets_fts")
+            
+            # Populate FTS table with existing snippets
+            cursor.execute("""
+                INSERT INTO snippets_fts(description, content, language, tags, content_id)
+                SELECT 
+                    s.description,
+                    s.content,
+                    s.language,
+                    COALESCE(GROUP_CONCAT(t.name, ' '), '') as tags,
+                    s.id
+                FROM snippets s
+                LEFT JOIN snippet_tags st ON s.id = st.snippet_id
+                LEFT JOIN tags t ON st.tag_id = t.id
+                GROUP BY s.id
+            """)
+            
+            conn.commit()
+            print("FTS5 table populated successfully")
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise Exception(f"Failed to populate FTS table: {e}")
+        finally:
+            cursor.close()
 
 
 def create_database():
