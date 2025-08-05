@@ -118,3 +118,19 @@ jobs:
         draft: false
         prerelease: false
         files: release-assets/*
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Trigger Homebrew formula update
+      uses: peter-evans/repository-dispatch@v2
+      with:
+        token: ${{ secrets.HOMEBREW_UPDATE_TOKEN }}
+        repository: LalwaniPalash/homebrew-codx
+        event-type: update-formula
+        client-payload: '{
+          "version": "${{ github.ref_name }}"
+        }'
